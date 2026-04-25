@@ -1,0 +1,760 @@
+================================================================================
+  FLOWSYNC HEALTH — TEAM HANDOFF DOCUMENT
+  Last updated: April 2026
+  Author: Arghyadeep (Founder / ML Lead)
+================================================================================
+
+This document is the single source of truth for any engineer joining this
+project. Read it fully before touching any code. It covers what is built,
+what is not, what the rules are, and how every layer fits together.
+
+--------------------------------------------------------------------------------
+  SECTION 1 — WHAT IS FLOWSYNC
+--------------------------------------------------------------------------------
+
+FlowSync Health is a B2B SaaS platform for Indian pharmaceutical depots.
+It solves five problems that cost each depot ₹6–11 lakhs per year:
+
+  1. Expiry losses         — medicines expire on shelves undetected (₹3–6L/year)
+  2. Billing chaos         — manual invoice typing errors, ghost stock (₹1–2L/year)
+  3. Cold chain failures   — fridge temperature excursions, fake logs
+  4. Payment confusion     — receipts unmatched to invoices for months
+  5. Compliance gaps       — GDP, Rule 65, Schedule M audit violations
+
+The system combines an ML prediction layer, a multi-agent decision engine,
+a FastAPI backend, IoT temperature sensors, and a mobile-first frontend.
+
+Target market: ~1.5 lakh licensed pharmaceutical depots in India.
+
+PRICING (DO NOT CHANGE WITHOUT FOUNDER APPROVAL):
+  Starter Plan      — ₹2,499 / month
+  Professional Plan — ₹4,999 / month
+  Enterprise Plan   — ₹9,999 / month
+  IoT Add-on        — ₹1,299 / fridge / month
+
+--------------------------------------------------------------------------------
+  SECTION 2 — SYSTEM ARCHITECTURE OVERVIEW
+--------------------------------------------------------------------------------
+
+  INBOUND DATA SOURCES
+  ├── Tally / Marg ERP exports (CSV/Excel) — stock movements, invoices
+  ├── Field rep mobile app — payment photos, GPS, returns
+  ├── IoT sensors — MQTT temperature every 5 minutes
+  └── OCR pipeline — photo invoices from WhatsApp / camera
+
+  CORE LAYERS (bottom to top)
+  ├── PostgreSQL (multi-tenant, RLS per depot)
+  ├── ML Layer (ml/) — nightly predictions + auto-training
+  ├── Agent Layer (ml/agents/) — decisions from predictions
+  ├── FastAPI Backend (backend/) — REST API
+  ├── Celery + Redis — async tasks, nightly pipeline trigger
+  └── Frontend (not started)
+
+  NIGHTLY PIPELINE (2 AM, triggered by Celery)
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  Stage 1: Demand forecast (XGBoost) → demand_predictions table      │
+  │  Stage 2: Expiry risk (RF + Calibrated) ─┐  (parallel asyncio)      │
+  │  Stage 2: Stockout risk (formula)        ─┘                         │
+  │  Stage 3: FEFO ranking (sort + ML override)                         │
+  │  Stage 4: Anomaly detection (Z-score) ← background, non-blocking    │
+  │  Stage 5: All 4 agents run on shared state (in-memory, sync)        │
+  │  Stage 6: Coordinator resolves conflicts, writes agent_actions       │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  Every stage has a fallback to yesterday's data if it fails.
+  Every outcome is written to pipeline_run_logs.
+
+  MULTI-TENANCY MODEL
+  Every tenant (depot) has RLS enforced at the PostgreSQL level.
+  FastAPI middleware reads depot_id from JWT and runs:
+    SET LOCAL app.current_depot_id = '{depot_id}'
+  before every query. RLS policies on every tenant table enforce this.
+  ML pipeline uses a separate admin connection that bypasses RLS.
+  The admin connection is NEVER exposed through any HTTP route.
+
+--------------------------------------------------------------------------------
+  SECTION 3 — REPOSITORY STRUCTURE
+--------------------------------------------------------------------------------
+
+  FlowSync/
+  ├── ml/                          ← Machine learning layer (COMPLETE)
+  │   ├── shared/
+  │   │   └── config_loader.py     ← Single source of all thresholds
+  │   ├── features/
+  │   │   ├── demand_features.py
+  │   │   ├── expiry_features.py
+  │   │   └── anomaly_features.py
+  │   ├── inference/
+  │   │   ├── orchestrator.py      ← Nightly pipeline coordinator
+  │   │   ├── infer_demand.py
+  │   │   ├── infer_expiry.py
+  │   │   ├── infer_stockout.py
+  │   │   ├── infer_fefo.py
+  │   │   └── infer_anomaly.py
+  │   ├── agents/
+  │   │   ├── base.py              ← AgentDecision, ActionType, COORDINATOR_PRIORITY
+  │   │   ├── expiry_agent.py
+  │   │   ├── reorder_agent.py
+  │   │   ├── dispatch_agent.py
+  │   │   ├── anomaly_agent.py
+  │   │   └── coordinator.py      ← AgentCoordinator — runs all agents + deduplication
+  │   ├── pipeline/
+  │   │   ├── data_ingester.py    ← Tally / Marg / CSV loader
+  │   │   ├── schema_mapper.py    ← Auto-maps any column names to FlowSync schema
+  │   │   ├── data_validator.py   ← Sales/batch quality checks + training sufficiency
+  │   │   └── auto_trainer.py     ← Client onboarding + scheduled fine-tuning
+  │   ├── registry/
+  │   │   └── model_store.py      ← Save/load models (S3 + local fallback)
+  │   └── drift/
+  │       └── psi_monitor.py      ← PSI-based feature drift detection
+  │
+  ├── backend/                     ← FastAPI layer (FRAMEWORK DONE, ROUTES ARE STUBS)
+  │   ├── config.py                ← All env vars (Pydantic Settings) — COMPLETE
+  │   ├── database.py              ← Async engine, RLS session, admin session — COMPLETE
+  │   ├── main.py                  ← App startup, routers, middleware — COMPLETE
+  │   ├── tasks.py                 ← Celery tasks — STUB (pipeline not wired yet)
+  │   ├── models/                  ← SQLAlchemy ORM — PARTIALLY COMPLETE
+  │   │   ├── ml.py                ← ML tables — COMPLETE
+  │   │   ├── users.py             ← Needs review
+  │   │   ├── products.py          ← Needs review
+  │   │   ├── batches.py           ← Needs review
+  │   │   ├── stock.py             ← Needs review
+  │   │   ├── retailers.py         ← Needs review
+  │   │   ├── invoices.py          ← Needs review
+  │   │   ├── payments.py          ← Needs review
+  │   │   ├── returns.py           ← Needs review
+  │   │   ├── temperature.py       ← Needs review
+  │   │   ├── compliance.py        ← Needs review
+  │   │   └── notifications.py     ← Needs review
+  │   ├── schemas/                 ← Pydantic v2 request/response schemas — STUBS
+  │   ├── middleware/
+  │   │   ├── auth_middleware.py   ← JWT validation — Needs review
+  │   │   ├── audit_middleware.py  ← Writes audit_trail — Needs review
+  │   │   └── rate_limit.py        ← Redis rate limiting — Needs review
+  │   ├── routers/                 ← ALL STUBS (only /health endpoint in each)
+  │   │   ├── auth.py
+  │   │   ├── inventory.py
+  │   │   ├── billing.py
+  │   │   ├── payments.py
+  │   │   ├── returns.py
+  │   │   ├── temperature.py
+  │   │   ├── expiry.py
+  │   │   ├── recalls.py
+  │   │   ├── compliance.py
+  │   │   ├── retailers.py
+  │   │   ├── agents.py
+  │   │   └── analytics.py
+  │   └── services/                ← Business logic — PARTIALLY STARTED
+  │       ├── ocr_service.py       ← Needs review
+  │       ├── inventory_service.py ← Needs review
+  │       ├── cold_chain_service.py← Needs review
+  │       ├── compliance_service.py← Needs review
+  │       ├── notification_service.py ← Needs review
+  │       └── storage_service.py   ← Needs review
+  │
+  ├── database/                    ← SQL scripts — CRITICAL GAP
+  │   └── views.sql                ← Empty file. schema.sql, triggers, seeds MISSING
+  │
+  ├── iot/                         ← IoT MQTT layer — NOT STARTED
+  ├── tests/                       ← Tests — NOT STARTED
+  │
+  ├── data/                        ← Training datasets (Kaggle)
+  │   ├── rossmann/
+  │   ├── pharma_sales_data/
+  │   ├── m5_forecasting/
+  │   └── pharma_otc_sales/
+  │
+  ├── .claude/
+  │   ├── specs/                   ← All 9 product specs (read before building)
+  │   └── rules/                   ← Code style, backend rules, ML rules
+  └── .env                         ← Local env vars (never commit)
+
+--------------------------------------------------------------------------------
+  SECTION 4 — ML LAYER: WHAT IS BUILT AND HOW IT WORKS
+--------------------------------------------------------------------------------
+
+The entire ML layer is production-ready. Here is what each file does.
+
+  ml/shared/config_loader.py
+    The ONLY place thresholds exist at runtime.
+    get_config(db_session) reads compliance_config table at 2 AM.
+    Falls back to _defaults() if DB is unreachable.
+    Used by every inference file. Cache is cleared at start of each pipeline run.
+
+    Key thresholds and their defaults:
+      fefo_override_threshold:     0.60
+      expiry_critical_threshold:   0.85  ← SUGGEST_LIQUIDATION fires above this
+      expiry_warning_threshold:    0.60  ← FLAG_PRIORITY_DISPATCH fires above this
+      anomaly_hold_threshold:      2.5   ← ANOMALY_HOLD fires above this Z-score
+      anomaly_alert_threshold:     2.0   ← ANOMALY_ALERT fires above this Z-score
+      default_lead_time_days:      7
+      cashflow_reorder_reduction:  0.30  ← Reorder qty reduced by 30% in cashflow crunch
+
+  ml/features/
+    demand_features.py  — builds XGBoost feature matrix from sales data
+                          (lag features, rolling means, festival flags, dow/month)
+    expiry_features.py  — builds RF feature matrix from batch data
+                          (velocity ratio, time pressure, category risk)
+    anomaly_features.py — builds Z-score features from stock movements
+                          (category baseline mean/std, lookback window)
+
+  ml/inference/orchestrator.py
+    Entry point: run_inference_pipeline(depot_id, run_date, db)
+    Entry point: run_all_depots(run_date, db)  ← called by Celery task
+    Runs all 6 stages in strict order (see architecture diagram above).
+    Never change the stage order.
+
+  ml/inference/infer_demand.py
+    Loads XGBoost demand model from model_store.
+    Predicts 14-day demand per product.
+    Writes to demand_predictions table.
+    Cold start: if no client model exists, uses global Kaggle-trained model.
+
+  ml/inference/infer_expiry.py
+    Loads RF + CalibratedClassifierCV model.
+    Falls back to formula if model not trained yet (< 180 days of data).
+    Formula: risk = (days_sold / shelf_life) * velocity_pressure
+    Writes to expiry_predictions table.
+
+  ml/inference/infer_stockout.py
+    Pure formula (no ML model needed — works day one).
+    days_until_stockout = current_stock / daily_demand_rate
+    Writes to stockout_predictions table.
+
+  ml/inference/infer_fefo.py
+    Sorts all active batches by expiry_date ASC (legally required).
+    ML override: if expiry_risk_score > fefo_override_threshold, batch
+                 gets priority_score = risk * -10 (pushed to top).
+    Writes to fefo_rankings table.
+
+  ml/inference/infer_anomaly.py
+    Runs as background task (Stage 4) — does not block agents.
+    Z-score per stock movement against product-depot baseline.
+    Writes to anomaly_flags table.
+
+  ml/agents/
+    All agents are synchronous BaseAgent subclasses.
+    They operate purely in-memory on a state dict — no DB calls.
+    The orchestrator queries the DB after inference and builds the state dict.
+
+    expiry_agent.py    — reads state["expiry_predictions"]
+                         → SUGGEST_LIQUIDATION (APPROVE) if risk > critical
+                         → FLAG_PRIORITY_DISPATCH (NOTIFY) if risk > warning
+
+    reorder_agent.py   — reads state["stockout_risks"]
+                         Guard 1: suppresses reorder if liquidation active for same product
+                         Guard 2: reduces qty 30% if state["cashflow_negative"] is True
+                         → SUGGEST_REORDER (APPROVE) if days < lead_time
+                         → SUGGEST_REORDER (NOTIFY) if days < lead_time * 1.5
+
+    dispatch_agent.py  — reads state["fefo_rankings"]
+                         Skips any batch in state["held_batches"] (ANOMALY_HOLD)
+                         → DISPATCH_PLAN (AUTO) for every eligible batch with demand
+
+    anomaly_agent.py   — reads state["anomaly_flags"]
+                         → ANOMALY_HOLD (APPROVE) — physically blocks batch
+                         → ANOMALY_ALERT (NOTIFY) — manager notified, not blocked
+
+    coordinator.py     — instantiates all 4 agents, runs them, deduplicates, sorts by priority
+                         Priority order (NEVER change):
+                           1. ANOMALY_HOLD
+                           2. SUGGEST_LIQUIDATION
+                           3. FLAG_PRIORITY_DISPATCH
+                           4. SUGGEST_REORDER
+                           5. DISPATCH_PLAN
+                           6. ANOMALY_ALERT
+                         Conflict rule: suppresses SUGGEST_REORDER when
+                           SUGGEST_LIQUIDATION is active for same product.
+                         Returns list of dicts written to agent_actions table.
+
+  APPROVAL TIERS (defined in ml/agents/base.py):
+    AUTO    — executes without human, no notification
+    NOTIFY  — WhatsApp fires immediately, operation proceeds
+    APPROVE — operation BLOCKED until manager acts or 24h expires
+
+  ml/pipeline/auto_trainer.py
+    Triggered by: new client upload, Sunday midnight Celery task, PSI drift alert.
+    Flow: ingest → map schema → validate data sufficiency → fine-tune → A/B test → register.
+    Fine-tuning uses XGBoost warm-start from global model weights.
+    Only deploys fine-tuned model if it beats global MAPE on client's own data.
+
+    COLD START RULES (from ml/pipeline/data_validator.py):
+      < 90 days data          → USE_GLOBAL_MODEL (global Kaggle model deployed)
+      90–179 days data        → SUFFICIENT_FOR_DEMAND (fine-tune demand only)
+      180+ days + 50 labels   → SUFFICIENT_FOR_BOTH (fine-tune both models)
+
+  ml/registry/model_store.py
+    ModelStore.save(model, name, metadata) → S3, with local fallback
+    ModelStore.load(name)                  → loads latest active version
+    ModelStore.rollback(name)              → promotes previous version
+    Local fallback dir: ml/models/saved/
+
+  ml/drift/psi_monitor.py
+    PSI thresholds: PSI < 0.10 = stable, PSI > 0.20 = trigger retraining.
+    Run after every inference batch to detect feature distribution shift.
+
+--------------------------------------------------------------------------------
+  SECTION 5 — BACKEND LAYER: WHAT IS DONE vs WHAT IS STUB
+--------------------------------------------------------------------------------
+
+  FULLY COMPLETE (no changes needed):
+    backend/config.py     — all environment variables, Pydantic v2 Settings
+    backend/database.py   — async SQLAlchemy engine, RLS session (get_db),
+                            admin session (get_admin_db), sync admin session
+                            (get_admin_db_sync for Celery), health check
+    backend/main.py       — FastAPI app, CORS, all middleware + routers registered,
+                            lifespan events, /health endpoint
+
+  COMPLETE ORM MODEL (review and verify columns match schema.sql when written):
+    backend/models/ml.py  — DemandPrediction, ExpiryPrediction, FefoRanking,
+                            AgentAction, ModelRegistry, PipelineRunLog,
+                            DriftLog, SystemAlert
+
+  STUB — needs one line to wire the ML pipeline:
+    backend/tasks.py
+      The Celery task run_pipeline_stub() logs and returns "queued".
+      It must call the orchestrator. Replace stub body with:
+
+        import asyncio
+        from backend.database import get_admin_db
+        from ml.inference.orchestrator import run_all_depots
+
+        @celery_app.task(name="flowsync.pipeline.run")
+        def trigger_nightly(run_date: str) -> dict:
+            async def _run():
+                async with get_admin_db() as db:
+                    return await run_all_depots(run_date, db)
+            return asyncio.run(_run())
+
+  ALL ROUTERS — STUBS (each has only a /health endpoint):
+    Every router file exists and is registered in main.py but contains
+    no real business logic. Each must be filled in according to the
+    API contracts in .claude/specs/.
+
+    Router → Spec file mapping:
+      auth.py         → (JWT, login, refresh, role management)
+      inventory.py    → .claude/specs/02-inventory.md
+      billing.py      → .claude/specs/01-ocr-billing.md
+      payments.py     → .claude/specs/05-reconciliation.md
+      returns.py      → .claude/specs/06-returns.md
+      temperature.py  → .claude/specs/04-cold-chain.md
+      expiry.py       → .claude/specs/03-expiry-fefo.md
+      recalls.py      → .claude/specs/07-compliance.md
+      compliance.py   → .claude/specs/07-compliance.md
+      retailers.py    → .claude/specs/05-reconciliation.md
+      agents.py       → .claude/specs/03-expiry-fefo.md (approve/reject endpoint)
+      analytics.py    → .claude/specs/08-analytics.md
+
+  ROUTER PATTERN (mandatory, from backend-rules.md):
+    - Routers validate input and call a service. ZERO business logic in routers.
+    - Services contain pure business logic. ZERO HTTP knowledge in services.
+    - Never put a DB query directly in a router.
+
+  SERVICES — status unknown, needs audit:
+    Each service file exists but completeness is unverified.
+    Audit each before building the matching router.
+      ocr_service.py          → billing router
+      inventory_service.py    → inventory router
+      cold_chain_service.py   → temperature router
+      compliance_service.py   → compliance + recalls routers
+      notification_service.py → WhatsApp / email (used by all agents after NOTIFY)
+      storage_service.py      → S3 uploads (invoice images, reports)
+
+  SCHEMAS — stubs:
+    Pydantic v2 schema files exist for most modules but are likely empty
+    or minimal. Must be filled per spec before wiring into routers.
+
+  MIDDLEWARE — needs audit:
+    auth_middleware.py   → extracts depot_id from JWT, sets request.state.depot_id
+    audit_middleware.py  → writes to audit_trail on all mutating requests (POST/PUT/DELETE)
+    rate_limit.py        → Redis-based per-IP and per-user rate limiting
+
+--------------------------------------------------------------------------------
+  SECTION 6 — WHAT DOES NOT EXIST YET
+--------------------------------------------------------------------------------
+
+  CRITICAL (everything else depends on this):
+
+  database/schema.sql — DOES NOT EXIST
+    This is the first thing that must be built.
+    All inference writes, agent actions, ORM models, and the config_loader
+    all depend on the tables being there.
+
+    Tables that must be created (minimum for ML pipeline to run):
+      depots                — tenant root (id, name, is_active, region, ...)
+      products              — product catalogue
+      batches               — batch tracking (expiry_date, quantity, ...)
+      stock_movements       — every stock in/out movement
+      demand_predictions    — nightly XGBoost output
+      expiry_predictions    — nightly RF output
+      stockout_predictions  — nightly formula output
+      fefo_rankings         — nightly FEFO sort output
+      anomaly_flags         — Z-score anomaly detections
+      agent_actions         — all agent decisions with approval status
+      pipeline_run_logs     — one row per depot per night
+      compliance_config     — ALL thresholds (fefo_override_threshold, etc.)
+      model_registry        — trained model versions + S3 keys
+      users                 — roles: ADMIN, MANAGER, STAFF, FIELD_REP
+      retailers             — customer/retailer master
+      invoices              — sales invoices
+      payment_transactions  — payment records
+      returns               — return requests
+      temperature_logs      — IoT sensor readings (INSERT ONLY)
+      audit_trail           — immutable change log (INSERT ONLY)
+      system_alerts         — ML pipeline failure alerts
+      drift_logs            — PSI monitoring history
+
+    IMMUTABLE TABLES (legally required — must have DB triggers):
+      audit_trail      → INSERT only (IT Act 2000 compliance)
+      temperature_logs → INSERT only (WHO GDP Guidelines compliance)
+      Any UPDATE or DELETE on these tables is a legal violation.
+
+  database/triggers.sql — DOES NOT EXIST
+    Minimum triggers required:
+      1. Prevent UPDATE/DELETE on audit_trail
+      2. Prevent UPDATE/DELETE on temperature_logs
+      3. Auto-generate credit_note on return approval (Module 6)
+      4. Update retraining_labels view when agent action is decided
+
+  database/seeds/ — DOES NOT EXIST
+    Minimum seed data:
+      compliance_config table — ALL threshold key-value pairs.
+        This is what config_loader.py reads at 2 AM.
+        Keys (with default values from ml/shared/config_loader.py _defaults()):
+          fefo_override_threshold       = 0.6
+          expiry_critical_threshold     = 0.85
+          expiry_warning_threshold      = 0.60
+          anomaly_hold_threshold        = 2.5
+          anomaly_alert_threshold       = 2.0
+          temp_cold_chain_min           = 2.0
+          temp_cold_chain_max           = 8.0
+          temp_general_min              = 15.0
+          temp_general_max              = 25.0
+          default_lead_time_days        = 7
+          cashflow_reorder_reduction    = 0.3
+          exact_match_tolerance         = 0.01
+          consolidated_match_tolerance  = 0.02
+          consolidation_invoice_limit   = 5
+          approval_expiry_hours         = 24
+          iot_silence_alert_minutes     = 35
+          mape_target                   = 0.15
+          auc_target                    = 0.80
+          recall_target                 = 0.85
+          festival_dates                = [...] (see config_loader._defaults())
+
+  RLS POLICIES — DOES NOT EXIST
+    Every tenant-scoped table must have:
+      ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+      CREATE POLICY depot_isolation ON {table}
+        USING (depot_id = current_setting('app.current_depot_id', TRUE)::uuid);
+
+  iot/ — NOT STARTED
+    MQTT subscriber listening to sensor topics.
+    On temperature reading: INSERT into temperature_logs (append only).
+    On silence (no reading for 35 min): trigger ANOMALY_ALERT via agent system.
+    Spec: .claude/specs/04-cold-chain.md
+
+  tests/ — NOT STARTED
+    Critical tests needed before production:
+      test_reconciliation.py  — 4-rule matching engine (all cases)
+      test_fefo.py            — FEFO ordering + ML override
+      test_agents.py          — agent decisions + conflict resolution
+      test_orchestrator.py    — stage ordering + fallback behavior
+      test_config_loader.py   — threshold loading + cache clear
+      test_auto_trainer.py    — cold start rules, A/B test logic
+
+  frontend/ — NOT STARTED
+    Mobile-first React / React Native.
+    Primary screens: Dashboard radar, FEFO pick list, temperature monitor,
+    payment collection, agent action queue (approve/reject).
+
+--------------------------------------------------------------------------------
+  SECTION 7 — CRITICAL RULES (NEVER VIOLATE)
+--------------------------------------------------------------------------------
+
+These rules are in .claude/rules/. Read those files too. Violations here
+will cause legal issues, production bugs, or data loss.
+
+  DATABASE:
+    1. Never add UPDATE or DELETE permissions to audit_trail or temperature_logs.
+       This is an IT Act 2000 and WHO GDP compliance requirement.
+    2. Every tenant-scoped table must have RLS enabled.
+    3. Never expose the admin_engine or admin_db_url through any HTTP route.
+    4. The Celery Beat scheduler must run as exactly ONE replica. Never scale it.
+
+  ML MODELS:
+    5. Never remove class_weight='balanced' from the expiry risk model.
+    6. Never remove CalibratedClassifierCV from the expiry risk model.
+       Both are required for calibrated probabilities at the decision threshold.
+    7. Never change the COORDINATOR_PRIORITY order in ml/agents/base.py.
+    8. Never change the stage order in ml/inference/orchestrator.py.
+    9. Never duplicate feature engineering code between training and inference.
+       Training uses ml/features/, inference uses the same ml/features/ files.
+
+  CONFIG:
+    10. Never hardcode these threshold values anywhere except compliance_config seed:
+        0.85, 0.60, 2.5, 0.6 (and their variants)
+        Always read from config_loader.get() or config_loader.get_config().
+
+  RECONCILIATION (Module 5):
+    11. The 4-rule matching engine uses first-match-wins. Rule order is fixed:
+        Rule 1: Exact match (±1%, same retailer) → SETTLED
+        Rule 2: Partial (< invoice, same retailer, ≥10%) → PARTIAL
+        Rule 3: Consolidated (≈ sum of 2-5 invoices ±2%) → SETTLED all
+        Rule 4: Advance (no invoice, retailer known) → ADVANCE
+        Fallback: UNLINKED → manual review
+
+  CELERY:
+    12. celery_beat runs as ONE replica only.
+    13. celery_worker scales horizontally, max_concurrency=4 per worker.
+
+  FEFO:
+    14. Default sort is expiry_date ASC. This is legally required under
+        Schedule M of the Drugs & Cosmetics Rules.
+    15. ML override (risk > fefo_override_threshold) only activates when
+        BOTH conditions are true: risk > threshold AND batch has a model score.
+
+  PRICING:
+    16. Never change pricing without founder (Arghyadeep) sign-off.
+
+--------------------------------------------------------------------------------
+  SECTION 8 — BUILD ORDER FOR NEW ENGINEERS
+--------------------------------------------------------------------------------
+
+Follow this exact order. Each step unblocks the next.
+
+  DATABASE ENGINEER — Start here first. Everything else is blocked.
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  Step 1: Write database/schema.sql                                 │
+  │    Create all tables listed in Section 6.                          │
+  │    Match column names exactly to the ORM models in backend/models/ │
+  │    and to the SQL queries in ml/inference/ files.                  │
+  │                                                                    │
+  │  Step 2: Write database/triggers.sql                               │
+  │    INSERT-only enforcement on audit_trail and temperature_logs.    │
+  │    Auto credit-note trigger for return approvals.                  │
+  │                                                                    │
+  │  Step 3: Write database/seeds/seed_compliance_config.py (or .sql)  │
+  │    All key-value pairs listed in Section 6 must be seeded.         │
+  │    These values are what config_loader.py reads at 2 AM.           │
+  │    Without this, ALL ML thresholds fall back to hardcoded defaults. │
+  │                                                                    │
+  │  Step 4: Add RLS policies to all tenant-scoped tables.             │
+  │                                                                    │
+  │  Step 5: Verify the ORM models in backend/models/ match schema.sql │
+  └────────────────────────────────────────────────────────────────────┘
+
+  BACKEND ENGINEER — Start after schema.sql exists.
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  Step 6: Wire the Celery pipeline task (backend/tasks.py)          │
+  │    See the exact code snippet in Section 5 above.                  │
+  │    Test that the ML pipeline runs end-to-end for one depot.        │
+  │                                                                    │
+  │  Step 7: Audit middleware files (auth, audit, rate_limit)          │
+  │    Ensure auth_middleware sets request.state.depot_id from JWT.    │
+  │    Ensure audit_middleware writes to audit_trail on mutations.     │
+  │                                                                    │
+  │  Step 8: Build routers in this priority order:                     │
+  │    a. auth.py           — login, refresh, roles                    │
+  │    b. agents.py         — approve/reject endpoint (teams need this)│
+  │    c. expiry.py         — radar, FEFO ranking (core value prop)    │
+  │    d. inventory.py      — stock movements, ledger                  │
+  │    e. temperature.py    — cold chain readings, excursion history   │
+  │    f. billing.py        — invoices, OCR pipeline                   │
+  │    g. payments.py       — record payment, reconciliation           │
+  │    h. returns.py        — return requests, credit notes            │
+  │    i. retailers.py      — DSO, aging, credit limits               │
+  │    j. compliance.py     — GDP reports, recall tracing              │
+  │    k. analytics.py      — forecasting dashboard                    │
+  │    l. recalls.py        — recall tracing (< 10s requirement)       │
+  │                                                                    │
+  │    For EACH router: read the spec first (.claude/specs/),          │
+  │    implement the service, then wire router → service.              │
+  │    Never put a DB query directly in a router.                      │
+  └────────────────────────────────────────────────────────────────────┘
+
+  IOT ENGINEER — Can work in parallel with backend after schema is done.
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  Step 9: MQTT subscriber in iot/                                   │
+  │    Subscribe to sensor topics.                                     │
+  │    INSERT into temperature_logs (never UPDATE).                    │
+  │    On silence > 35 min: raise ANOMALY_ALERT via agent system.      │
+  │    Spec: .claude/specs/04-cold-chain.md                            │
+  └────────────────────────────────────────────────────────────────────┘
+
+  TEST ENGINEER — Can start writing tests as routers are completed.
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  Step 10: Write tests in tests/                                    │
+  │    Priority order: reconciliation, FEFO, agents, orchestrator.     │
+  │    Do not mock the database in integration tests — use a real      │
+  │    test DB. Past experience shows mocked tests pass while real     │
+  │    DB migrations fail.                                             │
+  └────────────────────────────────────────────────────────────────────┘
+
+  FRONTEND ENGINEER — Can start after auth + expiry + inventory routers work.
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  Step 11: Mobile-first frontend                                    │
+  │    Priority screens:                                               │
+  │      1. Dashboard — expiry radar, low stock alerts, action queue   │
+  │      2. FEFO pick list — QR scan verification for warehouse staff  │
+  │      3. Temperature monitor — live fridge status, excursion alerts │
+  │      4. Payment collection — field rep flow, GPS photo             │
+  │      5. Agent queue — approve/reject decisions with context        │
+  └────────────────────────────────────────────────────────────────────┘
+
+--------------------------------------------------------------------------------
+  SECTION 9 — ENVIRONMENT VARIABLES
+--------------------------------------------------------------------------------
+
+  Copy .env.example to .env and fill in all values before running.
+
+  REQUIRED (app will refuse to start without these):
+    DATABASE_URL     postgresql+asyncpg://user:pass@host:5432/flowsync
+    ADMIN_DB_URL     postgresql+asyncpg://admin:pass@host:5432/flowsync
+    REDIS_URL        redis://localhost:6379/0
+    JWT_SECRET       generate with: openssl rand -hex 32
+    S3_BUCKET        flowsync-dev (or your bucket name)
+    AWS_ACCESS_KEY   IAM key with S3 read/write to the bucket
+    AWS_SECRET_KEY   IAM secret
+    ENV              development | staging | production
+
+  OPTIONAL (notifications silent if missing):
+    WHATSAPP_TOKEN   Twilio WhatsApp Business API token
+    SENDGRID_KEY     SendGrid API key
+    FIREBASE_KEY     Firebase Admin SDK JSON encoded in base64
+
+  MQTT (IoT layer):
+    MQTT_BROKER_HOST  localhost (or your MQTT broker host)
+    MQTT_BROKER_PORT  1883
+
+  IMPORTANT NOTES:
+    - admin_db_url and database_url can point to the same PostgreSQL instance
+      but must use different DB users with different permission levels.
+    - The admin user bypasses RLS. The tenant user must be subject to RLS.
+    - Never commit .env to git.
+    - In production, inject env vars via Docker / Kubernetes secrets.
+      Never pass them as command-line arguments.
+
+--------------------------------------------------------------------------------
+  SECTION 10 — HOW TO RUN LOCALLY
+--------------------------------------------------------------------------------
+
+  Prerequisites:
+    Python 3.11+
+    PostgreSQL 14+
+    Redis
+    (Optional) AWS credentials for S3 (model store falls back to local if absent)
+
+  Setup:
+    python -m venv .venv
+    .venv\Scripts\activate       (Windows)
+    source .venv/bin/activate    (Linux/Mac)
+    pip install -r requirements.txt
+
+  Start API server:
+    uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+  Start Celery worker:
+    celery -A backend.tasks.celery_app worker --concurrency=4 --loglevel=info
+
+  Start Celery beat (EXACTLY ONE replica — never more):
+    celery -A backend.tasks.celery_app beat --loglevel=info
+
+  Run ML pipeline manually for one depot (dev testing):
+    python -c "
+    import asyncio
+    from backend.database import get_admin_db
+    from ml.inference.orchestrator import run_inference_pipeline
+    from datetime import date
+
+    async def main():
+        async with get_admin_db() as db:
+            status = await run_inference_pipeline(
+                depot_id='YOUR-DEPOT-UUID',
+                run_date=date.today().isoformat(),
+                db=db
+            )
+            print(status)
+
+    asyncio.run(main())
+    "
+
+  Run auto-trainer on a CSV file (client onboarding):
+    python -c "
+    from ml.pipeline.auto_trainer import AutoTrainer
+    trainer = AutoTrainer()
+    result = trainer.run(
+        client_id='test-client-001',
+        file_path='data/rossmann/train.csv',
+        trigger='onboard'
+    )
+    print(result)
+    "
+
+  API docs (dev only, disabled in production):
+    http://localhost:8000/docs
+
+--------------------------------------------------------------------------------
+  SECTION 11 — KNOWN ISSUES AND TECH DEBT
+--------------------------------------------------------------------------------
+
+  MINOR — config not from compliance_config table in two places:
+    ml/features/expiry_features.py, lines 156-167
+      CATEGORY_RISK dict is hardcoded.
+      Should be moved to compliance_config seed and read via config_loader.
+
+    ml/inference/infer_expiry.py, line 140
+      Expiry threshold loaded from model_store metadata instead of config_loader.
+      Should read from config_loader.get("expiry_critical_threshold").
+
+  NOT A BUG — intentional design:
+    ml/inference/_load_yesterday uses f-string for table name.
+    This is safe — table name only comes from 3 hardcoded callsites
+    within the same function. Not user-controlled.
+
+    backend/database.py get_db() uses f-string for depot_id in SET LOCAL.
+    depot_id is extracted from a verified JWT by auth_middleware before
+    reaching get_db(). Auth must validate depot_id is a valid UUID first.
+
+  TRAINING DATA NOTE:
+    All models were trained on public Kaggle datasets, not real client data.
+      - DemandForecaster: trained on Rossmann + M5 + OTC pharma sales
+      - ExpiryRiskModel: trained on pharma_sales_data (proxy labels)
+    Real client fine-tuning happens via auto_trainer.py once clients are
+    onboarded with 90+ days of data. Global models serve until then.
+
+--------------------------------------------------------------------------------
+  SECTION 12 — SPECS REFERENCE
+--------------------------------------------------------------------------------
+
+  All product specs live in .claude/specs/. Read the relevant spec file
+  BEFORE building any module. Do not build without a spec.
+
+  00-overview.md      System overview, NFRs, roles, global constraints
+  01-ocr-billing.md   AI billing, OCR invoice pipeline
+  02-inventory.md     Stock ledger, ghost stock detection
+  03-expiry-fefo.md   Expiry radar, FEFO dispatch, liquidation
+  04-cold-chain.md    IoT temperature monitoring, excursion alerts
+  05-reconciliation.md Financial reconciliation, DSO, credit risk
+  06-returns.md       Return requests, credit notes
+  07-compliance.md    GDP compliance, audit trail, recall tracing
+  08-analytics.md     Forecasting dashboard, reports
+
+  Code style rules:   .claude/rules/code-style.md
+  Backend rules:      .claude/rules/backend-rules.md
+  ML rules:           .claude/rules/ml-rules.md
+
+--------------------------------------------------------------------------------
+  SECTION 13 — CONTACT
+--------------------------------------------------------------------------------
+
+  Project owner and ML lead: Arghyadeep
+  Email: arghyadeepdeb020703@gmail.com
+
+  Questions about ML pipeline, agents, or model decisions → Arghyadeep
+  Questions about DB schema → DB engineer + Arghyadeep sign-off on RLS
+  Questions about pricing or product direction → Arghyadeep only
+
+================================================================================
+  END OF DOCUMENT
+================================================================================

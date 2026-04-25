@@ -1,0 +1,72 @@
+# ── Virtual environment ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Environment variables (never commit secrets) ──────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Personal / local Claude settings (not for the repo) ──────────────────────
+CLAUDE.local.md
+
+# ── Python bytecode ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# ── Training datasets — multi-GB Kaggle files, download separately ───────────
+data/rossmann/
+data/pharma_sales_data/
+data/m5_forecasting/
+data/pharma_otc_sales/
+
+# ── Trained model files — saved via ModelStore to S3, not git ────────────────
+ml/models/saved/
+*.pkl
+*.joblib
+*.h5
+*.model
+*.xgb
+*.bin
+
+# ── Jupyter notebook checkpoints ─────────────────────────────────────────────
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# ── Test / coverage artifacts ─────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.coveragerc
+
+# ── Build / packaging ─────────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# ── IDE and OS files ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Temporary files ───────────────────────────────────────────────────────────
+*.tmp
+*.temp
+tmp/
+temp/
