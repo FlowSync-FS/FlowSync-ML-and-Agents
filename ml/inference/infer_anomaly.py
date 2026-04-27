@@ -128,6 +128,7 @@ async def run(
         flags.append({
             "movement_id":   row.movement_id,
             "batch_id":      row.batch_id,
+            "product_id":    row.product_id,
             "z_score":       round(z, 2),
             "action":        action,
             "quantity":      float(row.quantity),
@@ -164,15 +165,16 @@ async def _write_flags(
     for f in flags:
         await db.execute("""
             INSERT INTO anomaly_flags
-                (depot_id, movement_id, batch_id, run_date,
+                (depot_id, movement_id, batch_id, product_id, run_date,
                  z_score, action, quantity, movement_type)
             VALUES
-                (:did, :mid, :bid, :rd,
+                (:did, :mid, :bid, :pid, :rd,
                  :z, :action, :qty, :mtype)
         """, {
             "did":    depot_id,
             "mid":    f["movement_id"],
             "bid":    f["batch_id"],
+            "pid":    f["product_id"],
             "rd":     run_date,
             "z":      f["z_score"],
             "action": f["action"],

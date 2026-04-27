@@ -310,14 +310,14 @@ async def _build_agent_state(depot_id: str, run_date: str, db) -> dict:
         SELECT batch_id, product_id, expiry_risk_score,
                recommended_liquidation_date, method,
                remaining_qty, ptr, product_name
-        FROM   expiry_predictions
+        FROM   v_expiry_predictions
         WHERE  depot_id = :did AND run_date = :rd
     """, p)
 
     stockout_risks = await _fetch("""
         SELECT product_id, product_name, days_until_stockout,
                lead_time_days, current_stock, predicted_units_14d
-        FROM   stockout_predictions
+        FROM   v_stockout_risks
         WHERE  depot_id = :did AND run_date = :rd
     """, p)
 
@@ -325,7 +325,7 @@ async def _build_agent_state(depot_id: str, run_date: str, db) -> dict:
         SELECT batch_id, product_id, priority_rank, days_till_expiry,
                ml_override, units_available, predicted_units_14d,
                product_name, expiry_date
-        FROM   fefo_rankings
+        FROM   v_fefo_rankings
         WHERE  depot_id = :did AND run_date = :rd
         ORDER  BY priority_rank ASC
     """, p)
@@ -334,8 +334,8 @@ async def _build_agent_state(depot_id: str, run_date: str, db) -> dict:
     anomaly_flags = await _fetch("""
         SELECT batch_id, product_id, z_score, action,
                quantity, movement_type, movement_id, product_name
-        FROM   anomaly_flags
-        WHERE  depot_id = :did AND detected_date = :rd
+        FROM   v_anomaly_flags
+        WHERE  depot_id = :did AND run_date = :rd
     """, p)
 
     demand_forecast = await _fetch("""
