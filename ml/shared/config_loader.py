@@ -8,45 +8,67 @@ Never hardcode thresholds anywhere else.
 
 import json
 import logging
-from functools import lru_cache
 from typing import Any
 
 logger = logging.getLogger("flowsync.config")
 
+# Module-level cache — populated once per pipeline run by load_config().
+# Empty dict means "not yet loaded — fall back to _defaults()".
+_config_cache: dict = {}
 
-@lru_cache(maxsize=1)
-def get_config(db_session) -> dict:
+
+async def load_config(db) -> None:
     """
-    Load all compliance_config rows into a flat dict.
-    lru_cache: read once per pipeline run, not per batch.
-    Call get_config.cache_clear() at start of each orchestrator run.
+    Async loader called once at the start of each pipeline run by orchestrator.
+    Populates _config_cache from compliance_config table.
+    Replaces the old synchronous get_config(db_session) which silently failed
+    when called with an AsyncSession (sync .execute() on async session raises
+    AttributeError, causing the cache to always return _defaults()).
+
+    Args:
+        db: async SQLAlchemy session (admin connection)
+
+    Side effects:
+        Overwrites module-level _config_cache.
     """
+    global _config_cache
     try:
-        rows = db_session.execute(
-            "SELECT key, value FROM compliance_config"
-        ).fetchall()
-        config = {}
-        for row in rows:
+        rows = await db.execute("SELECT key, value FROM compliance_config")
+        config: dict = {}
+        for row in rows.fetchall():
             try:
                 config[row.key] = json.loads(row.value)
             except (json.JSONDecodeError, TypeError):
                 config[row.key] = row.value
-        logger.info(f"Loaded {len(config)} config keys from compliance_config")
-        return config
+        _config_cache = config
+        logger.info(f"Loaded {len(_config_cache)} config keys from compliance_config")
     except Exception as e:
         logger.error(f"Config load failed: {e} — using hardcoded defaults")
-        return _defaults()
+        _config_cache = {}
+
+
+def get_config() -> dict:
+    """
+    Return the current runtime config, falling back to hardcoded defaults.
+    Call load_config(db) at pipeline start to populate from DB.
+    """
+    return _config_cache if _config_cache else _defaults()
 
 
 def get(key: str, db_session=None, default: Any = None) -> Any:
     """
-    Convenience accessor for a single key.
-    Usage: get("expiry_critical_threshold", db) -> 0.85
-    Falls back to hardcoded defaults if db_session is None.
+    Convenience accessor for a single config key.
+
+    Args:
+        key:        Config key to look up (e.g. 'expiry_critical_threshold').
+        db_session: Ignored — kept for call-site backward compatibility.
+                    Config is loaded once at pipeline start via load_config(db).
+        default:    Value to return if key is absent from both cache and defaults.
+
+    Returns:
+        Config value, or default if not found.
     """
-    if db_session is None:
-        return _defaults().get(key, default)
-    return get_config(db_session).get(key, default)
+    return get_config().get(key, _defaults().get(key, default))
 
 
 def _defaults() -> dict:

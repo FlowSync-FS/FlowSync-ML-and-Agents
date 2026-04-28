@@ -18,6 +18,7 @@ logger = logging.getLogger("flowsync.features.demand")
 
 # Exact feature columns used by XGBoost — order matters
 FEATURE_COLS = [
+    "lag_1",
     "lag_7",
     "lag_14",
     "lag_30",
@@ -41,7 +42,8 @@ TARGET_COL = "units_sold"
 def build_demand_features(
     df: pd.DataFrame,
     festival_dates: list = None,
-) -> tuple[pd.DataFrame, pd.Series]:
+    return_frame: bool = False,
+) -> tuple[pd.DataFrame, pd.Series] | tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """
     Build feature matrix for XGBoost demand forecaster.
 
@@ -52,6 +54,7 @@ def build_demand_features(
     Returns:
         X   — feature DataFrame (FEATURE_COLS)
         y   — target Series (units_sold)
+        df_clean — optional cleaned frame with identifiers when return_frame=True
     """
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"])
@@ -66,6 +69,9 @@ def build_demand_features(
 
     # Lag features — captures weekly ordering patterns
     # and monthly cycles (salary paydays affect retailer ordering)
+    # lag_1: yesterday's actual sales — strongest single predictor for
+    # 1-day-ahead demand; must be first feature for consistent encoding
+    df["lag_1"]  = grp.shift(1)
     df["lag_7"]  = grp.shift(7)
     df["lag_14"] = grp.shift(14)
     df["lag_30"] = grp.shift(30)
@@ -129,8 +135,9 @@ def build_demand_features(
     df["is_cold_chain"] = df["is_cold_chain"].astype(int)
 
     # Drop rows with NaN lags (first 30 days per product+depot)
+    # lag_1 NaN only on day-1 — already covered by lag_30 warmup window
     df_clean = df.dropna(
-        subset=["lag_7", "lag_14", "lag_30",
+        subset=["lag_1", "lag_7", "lag_14", "lag_30",
                 "rolling_avg_7", "rolling_avg_30"]
     )
 
@@ -147,12 +154,15 @@ def build_demand_features(
 
     X = df_clean[FEATURE_COLS].reset_index(drop=True)
     y = df_clean[TARGET_COL].reset_index(drop=True)
+    if return_frame:
+        return X, y, df_clean.reset_index(drop=True)
     return X, y
 
 
 def build_inference_features(
     df: pd.DataFrame,
     festival_dates: list = None,
+    return_frame: bool = False,
 ) -> pd.DataFrame:
     """
     Same as build_demand_features but returns only X (no y).
@@ -160,10 +170,13 @@ def build_inference_features(
     Fills remaining NaNs with column medians for graceful degradation
     on products with < 30 days history.
     """
-    X, _ = build_demand_features(df, festival_dates)
+    result = build_demand_features(df, festival_dates, return_frame=True)
+    X, _, df_clean = result
     for col in FEATURE_COLS:
         if X[col].isna().any():
             X[col] = X[col].fillna(X[col].median())
+    if return_frame:
+        return X, df_clean
     return X
 
 

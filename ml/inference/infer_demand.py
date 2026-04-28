@@ -101,7 +101,11 @@ async def run(
 
     # Build features using the shared features file
     # (same function used during training — no duplication)
-    X = build_inference_features(df, festival_dates=festival_dates)
+    X, feature_rows = build_inference_features(
+        df,
+        festival_dates=festival_dates,
+        return_frame=True,
+    )
 
     if X.empty:
         logger.warning(f"[{depot_id}] Feature matrix empty after build")
@@ -109,20 +113,19 @@ async def run(
 
     preds = model.predict(X).clip(min=0)
 
-    # Build results dict keyed by product_id
+    feature_rows = feature_rows.copy()
+    feature_rows["predicted_daily_rate"] = preds
+
+    # Build results dict keyed by product_id using all feature rows for that product.
+    # A product can appear on multiple dates; aggregate the per-row model output.
     results = {}
-    product_ids = df.drop_duplicates("product_id")["product_id"].tolist()
-
-    for i, pid in enumerate(product_ids):
-        if i >= len(preds):
-            break
-
+    for pid, grp in feature_rows.groupby("product_id", sort=False):
         product_df  = df[df["product_id"] == pid].sort_values("date")
-        daily_rate  = float(preds[i])
+        daily_rate  = float(grp["predicted_daily_rate"].mean())
         units_14d   = daily_rate * 14
         trend_slope = _compute_trend_slope(product_df)
 
-        results[pid] = {
+        results[str(pid)] = {
             "predicted_units_14d":  round(units_14d,   2),
             "predicted_daily_rate": round(daily_rate,   4),
             "demand_trend_slope":   round(trend_slope,  4),
@@ -218,21 +221,31 @@ def predict_demand(sales_df: pd.DataFrame) -> pd.DataFrame:
     df = sales_df.copy()
     df["date"] = pd.to_datetime(df["date"])
     df = fill_missing_dates(df)
-    X, _ = build_demand_features(df, festival_dates=festival_dates)
+    X, _, feature_rows = build_demand_features(
+        df,
+        festival_dates=festival_dates,
+        return_frame=True,
+    )
+
+    if model is not None:
+        preds = model.predict(X).clip(min=0)
+        feature_rows = feature_rows.copy()
+        feature_rows["predicted_daily_rate"] = preds
 
     records = []
     depot_id = str(df["depot_id"].iloc[0]) if "depot_id" in df.columns else "unknown"
 
-    for pid in df["product_id"].unique():
-        product_mask = df["product_id"] == pid
-        product_df   = df[product_mask].sort_values("date")
+    for pid, product_df in df.groupby("product_id", sort=False):
+        product_df = product_df.sort_values("date")
 
         if model is not None:
             try:
-                pid_mask   = X.index.isin(product_df.index)
-                X_pid      = X[pid_mask]
-                if not X_pid.empty:
-                    daily_rate = float(model.predict(X_pid).clip(min=0).mean())
+                pid_rates = feature_rows.loc[
+                    feature_rows["product_id"].astype(str) == str(pid),
+                    "predicted_daily_rate",
+                ]
+                if not pid_rates.empty:
+                    daily_rate = float(pid_rates.mean())
                 else:
                     daily_rate = float(product_df["units_sold"].mean())
             except Exception:

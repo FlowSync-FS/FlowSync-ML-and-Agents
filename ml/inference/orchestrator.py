@@ -32,7 +32,7 @@ from ml.inference import (
     infer_anomaly,
 )
 from ml.agents.coordinator import AgentCoordinator
-from ml.shared.config_loader import get_config, get
+from ml.shared.config_loader import load_config, get
 
 logger = logging.getLogger("flowsync.orchestrator")
 
@@ -59,9 +59,10 @@ async def run_inference_pipeline(
     Returns:
         RunStatus enum value
     """
-    # Clear config cache at start of each run so threshold changes
-    # in compliance_config take effect without server restart
-    get_config.cache_clear()
+    # Load compliance_config from DB at the start of each run so threshold
+    # changes take effect without redeployment. All get() calls within this
+    # pipeline run will read from the populated cache.
+    await load_config(db)
 
     run_log: dict = {
         "depot_id": depot_id,
@@ -345,8 +346,15 @@ async def _build_agent_state(depot_id: str, run_date: str, db) -> dict:
     """, p)
 
     try:
+        # Net cashflow: INFLOW positive, OUTFLOW negative.
+        # SUM(amount) alone is always positive — must apply sign by type.
         cashflow_row      = await _fetch("""
-            SELECT COALESCE(SUM(amount), 0) AS net_14d
+            SELECT COALESCE(SUM(
+                CASE WHEN transaction_type = 'INFLOW'  THEN  amount
+                     WHEN transaction_type = 'OUTFLOW' THEN -amount
+                     ELSE 0
+                END
+            ), 0) AS net_14d
             FROM   payment_transactions
             WHERE  depot_id         = :did
               AND  transaction_date >= CURRENT_DATE - INTERVAL '14 days'

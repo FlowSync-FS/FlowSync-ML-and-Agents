@@ -61,7 +61,7 @@ class DispatchAgent(BaseAgent):
         for row in state.get("fefo_rankings", []):
             r   = dict(row)
             pid = str(r.get("product_id", ""))
-            if not r.get("predicted_units_14d"):
+            if r.get("predicted_units_14d") is None:
                 r["predicted_units_14d"] = demand_by_pid.get(pid, 0.0)
             enriched.append(r)
 

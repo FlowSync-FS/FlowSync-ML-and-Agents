@@ -45,7 +45,7 @@ COLUMN_MAP: dict[str, list[str]] = {
     "units_sold": [
         "qty", "quantity", "units", "sale_qty", "quantity_sold",
         "billed_qty", "dispatched_qty", "sold_qty", "nos",
-        "quantity_out",
+        "quantity_out", "boxes_shipped", "units_sold",
     ],
     "depot_id": [
         "godown", "location", "warehouse", "store",

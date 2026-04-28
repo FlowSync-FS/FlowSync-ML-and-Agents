@@ -14,6 +14,9 @@
 - Remove `CalibratedClassifierCV` from expiry risk model
 - Add UPDATE or DELETE permissions to audit_trail or temperature_logs tables
 - Duplicate feature engineering code between training and inference
+- Call `get_config(db_session)` — that function is removed. Use `get(key)` for
+  single-key access. Config is loaded once per run via `await load_config(db)`
+  in orchestrator.py. Do not revert to `lru_cache` on a sync DB call.
 
 ## SDD Flow — Always Follow This
 Every feature must go through:
